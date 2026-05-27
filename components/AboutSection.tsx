@@ -42,12 +42,28 @@ export default function AboutSection() {
               </blockquote>
             </div>
 
-            <div className="reveal-right" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <div style={{ borderRadius: 10, overflow: 'hidden', aspectRatio: '4/3' }}>
-                <img src="/assets/shop-exterior.webp" alt="Lopez Quality Auto Repair shop" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
-              </div>
-              <div style={{ borderRadius: 10, overflow: 'hidden', aspectRatio: '16/9' }}>
-                <img src="/assets/shop-interior.webp" alt="Mechanics at work" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+            <div className="reveal-right">
+              <div style={{ 
+                borderRadius: 12, 
+                overflow: 'hidden', 
+                aspectRatio: '4/3', 
+                boxShadow: '0 20px 40px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.05)', 
+                border: '1px solid rgba(0,0,0,0.08)',
+                position: 'relative',
+                backgroundColor: '#f5f5f5'
+              }}>
+                <img 
+                  src="/assets/Lopez-Quality-Auto-Repair_f0dd08fe6c10d1c8b430ca37a3fb8fe5.jpg" 
+                  alt="Lopez Quality Auto Repair Shop and Team" 
+                  style={{ 
+                    width: '100%', 
+                    height: '100%', 
+                    objectFit: 'cover', 
+                    display: 'block',
+                    transition: 'transform 0.6s cubic-bezier(0.16, 1, 0.3, 1)'
+                  }} 
+                  className="about-image"
+                />
               </div>
             </div>
 
@@ -82,6 +98,9 @@ export default function AboutSection() {
       </div>
 
       <style>{`
+        .about-image:hover {
+          transform: scale(1.04);
+        }
         @media(max-width:1023px){
           .about-main-grid{grid-template-columns:1fr!important}
           .credentials-grid{grid-template-columns:1fr!important}
