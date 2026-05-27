@@ -8,58 +8,55 @@ import { btnFilledRed, btnOutlineNavy, inputStyle, wizardLead, modalBodyStyle, m
 
 type Flow = 'choose' | 'oil-lookup' | 'oil-active' | 'oil-ready' | 'repair-lookup' | 'repair-loading' | 'repair-status' | 'repair-notfound';
 
-const STATUS_ORDER = ['received', 'reviewing', 'in_repair', 'ready', 'completed'] as const;
-type TicketStatus = typeof STATUS_ORDER[number];
-
-interface TrackResult {
-  id: string;
-  status: TicketStatus;
-  year: string;
-  make: string;
-  model: string;
-  licensePlate: string | null;
-  issues: string[];
-  assignedTo: string | null;
-  appointmentDate: string | null;
-  appointmentTime: string | null;
-  customerName: string;
+interface TicketResult {
+  ticket_number: string;
+  status: string;
+  notes?: string;
 }
 
-const STAGES = [
-  { label: 'Received',   icon: 'inbox',          msg: 'We have your vehicle. Our team will review it shortly.' },
-  { label: 'Reviewing',  icon: 'clipboard-list',  msg: "We're inspecting your vehicle and writing up an estimate." },
-  { label: 'In Repair',  icon: 'wrench',          msg: "Your car is in the shop — our technicians are working on it now." },
-  { label: 'Ready',      icon: 'badge-check',     msg: "Your car is ready for pickup. Come on by!" },
-  { label: 'Completed',  icon: 'check-circle',    msg: "Service complete. Thanks for trusting us with your car." },
-];
+const STATUS_MAP: Record<string, { label: string; icon: string }> = {
+  new:        { label: "Received — we'll be in touch soon",            icon: 'inbox' },
+  reviewing:  { label: "Under Review — our mechanic is looking at it", icon: 'clipboard-list' },
+  in_repair:  { label: "In Progress — your car is being worked on",    icon: 'wrench' },
+  ready:      { label: "Ready for Pickup!",                            icon: 'badge-check' },
+  completed:  { label: "Completed",                                    icon: 'check-circle' },
+};
 
 export default function TrackMyCarModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [flow, setFlow] = useState<Flow>('choose');
   const [oilLookup, setOilLookup] = useState({ plate: '', phone: '' });
-  const [repairLookup, setRepairLookup] = useState({ ticketId: '', contact: '' });
-  const [repairResult, setRepairResult] = useState<TrackResult | null>(null);
-  const [remaining, setRemaining] = useState(38 * 60 + 22);
-  const [demoState, setDemoState] = useState('active');
+  const [repairLookup, setRepairLookup] = useState({ ticket: '', phone: '' });
+  const [ticketResult, setTicketResult] = useState<TicketResult | null>(null);
+  const [remaining, setRemaining] = useState(0);
+  const [totalSeconds, setTotalSeconds] = useState(45 * 60);
+  const [adjustmentMins, setAdjustmentMins] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [lookupError, setLookupError] = useState('');
+  const [repairError, setRepairError] = useState('');
 
   useEffect(() => {
     if (!open) {
       const t = setTimeout(() => {
         setFlow('choose');
         setOilLookup({ plate: '', phone: '' });
-        setRepairLookup({ ticketId: '', contact: '' });
-        setRepairResult(null);
-        setRemaining(38 * 60 + 22);
-        setDemoState('active');
+        setRepairLookup({ ticket: '', phone: '' });
+        setTicketResult(null);
+        setRemaining(0);
+        setTotalSeconds(45 * 60);
+        setAdjustmentMins(0);
+        setLoading(false);
+        setLookupError('');
+        setRepairError('');
       }, 250);
       return () => clearTimeout(t);
     }
   }, [open]);
 
   useEffect(() => {
-    if (flow !== 'oil-active' || demoState === 'ready') return;
+    if (flow !== 'oil-active') return;
     const id = setInterval(() => setRemaining(r => Math.max(0, r - 1)), 1000);
     return () => clearInterval(id);
-  }, [flow, demoState]);
+  }, [flow]);
 
   const goBack = () => {
     if (flow === 'oil-lookup' || flow === 'repair-lookup') setFlow('choose');
@@ -68,23 +65,76 @@ export default function TrackMyCarModal({ open, onClose }: { open: boolean; onCl
     else if (flow === 'repair-loading') setFlow('repair-lookup');
   };
 
-  const handleRepairLookup = async () => {
-    if (!repairLookup.ticketId.trim() || !repairLookup.contact.trim()) return;
-    setFlow('repair-loading');
+  const handleOilLookup = async () => {
+    if (!oilLookup.plate.trim() || !oilLookup.phone.trim()) return;
+    setLoading(true);
+    setLookupError('');
     try {
-      const res = await fetch('/api/track', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ticketId: repairLookup.ticketId.trim(), contact: repairLookup.contact.trim() }),
-      });
-      const data = await res.json();
-      if (data.found) {
-        setRepairResult(data.ticket);
-        setFlow('repair-status');
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_DASHBOARD_API_URL}/api/oil-changes/track`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            shop_id:       process.env.NEXT_PUBLIC_SHOP_ID,
+            license_plate: oilLookup.plate,
+            phone:         oilLookup.phone,
+          }),
+        }
+      );
+      const json = await res.json();
+      if (res.status === 404) {
+        setLookupError("We couldn't find an oil change for that plate and phone.");
+        setLoading(false);
+        return;
+      }
+      if (!res.ok) {
+        setLookupError('Something went wrong. Please try again.');
+        setLoading(false);
+        return;
+      }
+      const record = json.data ?? json;
+      if (record.status === 'ready') {
+        setFlow('oil-ready');
       } else {
-        setFlow('repair-notfound');
+        const eta   = new Date(record.started_at).getTime()
+                    + (record.estimated_minutes + record.adjustment_minutes) * 60000;
+        const secs  = Math.max(0, Math.floor((eta - Date.now()) / 1000));
+        const total = (record.estimated_minutes + record.adjustment_minutes) * 60;
+        setRemaining(secs);
+        setTotalSeconds(total > 0 ? total : 45 * 60);
+        setAdjustmentMins(record.adjustment_minutes ?? 0);
+        setFlow('oil-active');
       }
     } catch {
+      setLookupError('Network error. Please try again.');
+    }
+    setLoading(false);
+  };
+
+  const handleRepairLookup = async () => {
+    if (!repairLookup.ticket.trim() || !repairLookup.phone.trim()) return;
+    setFlow('repair-loading');
+    setRepairError('');
+    try {
+      const params = new URLSearchParams({
+        ticket_number: repairLookup.ticket,
+        phone:         repairLookup.phone,
+        shop_id:       process.env.NEXT_PUBLIC_SHOP_ID ?? 'lopez-quality-auto',
+      });
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_DASHBOARD_API_URL}/api/tickets/status?${params}`
+      );
+      if (res.status === 404) {
+        setRepairError('Ticket not found.');
+        setFlow('repair-notfound');
+        return;
+      }
+      const json = await res.json();
+      setTicketResult(json.data ?? json);
+      setFlow('repair-status');
+    } catch {
+      setRepairError('Network error. Please try again.');
       setFlow('repair-notfound');
     }
   };
@@ -114,7 +164,7 @@ export default function TrackMyCarModal({ open, onClose }: { open: boolean; onCl
           <p style={{ ...wizardLead, marginBottom: 22 }}>What are you tracking today?</p>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
             {([
-              { id: 'oil-lookup' as Flow,   icon: 'droplets', title: 'Oil Change',     sub: 'Quick service · countdown timer' },
+              { id: 'oil-lookup' as Flow,    icon: 'droplets', title: 'Oil Change',     sub: 'Quick service · countdown timer' },
               { id: 'repair-lookup' as Flow, icon: 'wrench',   title: 'Service Repair', sub: 'Full repair · status tracker' },
             ]).map(c => (
               <button key={c.id} onClick={() => setFlow(c.id)} style={{
@@ -157,16 +207,22 @@ export default function TrackMyCarModal({ open, onClose }: { open: boolean; onCl
                   style={inputStyle} />
               </Field>
             </div>
-            <div style={{ marginTop: 22, padding: '12px 14px', background: '#F5F5F5', border: '1px dashed #D8CFBC', borderRadius: 4, fontFamily: 'Inter,sans-serif', fontSize: 12.5, color: '#666666', lineHeight: 1.5 }}>
-              <strong style={{ color: '#111111' }}>Demo:</strong> Click "Find My Car" with anything — the next screens show a live-updating countdown timer.
-            </div>
+            {lookupError && (
+              <p style={{ fontFamily: 'Inter,sans-serif', fontSize: 13.5, color: '#B23A3A', marginTop: 12 }}>{lookupError}</p>
+            )}
           </div>
           <div style={modalFooterStyle}>
             <span />
-            <button onClick={() => setFlow('oil-active')} style={{ ...btnFilledRed, padding: '12px 22px', fontSize: 13 }}>
-              Find My Car <ArrowRight size={14} style={{ marginLeft: 8, verticalAlign: '-2px' }} />
+            <button
+              onClick={handleOilLookup}
+              disabled={loading || !oilLookup.plate.trim() || !oilLookup.phone.trim()}
+              style={{ ...btnFilledRed, padding: '12px 22px', fontSize: 13, opacity: (!oilLookup.plate.trim() || !oilLookup.phone.trim()) ? 0.5 : 1, cursor: (!oilLookup.plate.trim() || !oilLookup.phone.trim()) ? 'not-allowed' : 'pointer' }}>
+              {loading
+                ? <><Loader2 size={14} style={{ marginRight: 8, verticalAlign: '-2px', animation: 'spin 1s linear infinite' }} />Looking up…</>
+                : <>Find My Car <ArrowRight size={14} style={{ marginLeft: 8, verticalAlign: '-2px' }} /></>}
             </button>
           </div>
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
         </>
       )}
 
@@ -178,30 +234,25 @@ export default function TrackMyCarModal({ open, onClose }: { open: boolean; onCl
               <div>
                 <div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontSize: 11, fontWeight: 600, color: '#C41E3A', letterSpacing: '0.22em', textTransform: 'uppercase' }}>Your Vehicle</div>
                 <div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 700, fontSize: 17, color: '#111111', marginTop: 2 }}>
-                  {oilLookup.plate ? `Plate: ` : ''}
+                  {oilLookup.plate ? 'Plate: ' : ''}
                   <span style={{ fontFamily: 'ui-monospace,monospace', fontWeight: 600 }}>{oilLookup.plate || '—'}</span>
                 </div>
               </div>
             </div>
 
-            <CountdownRing seconds={remaining} totalSeconds={45 * 60} />
+            <CountdownRing seconds={remaining} totalSeconds={totalSeconds} />
 
             <div style={{ textAlign: 'center', marginTop: 22, fontFamily: "'Barlow Condensed',sans-serif", fontSize: 16, fontWeight: 600, color: '#111111', letterSpacing: '0.16em', textTransform: 'uppercase' }}>
               <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#C41E3A', marginRight: 10, verticalAlign: '2px', animation: 'pulse-dot 1.6s infinite' }} />
               Your car is being serviced
             </div>
 
-            {demoState === 'early' && <div style={adjustmentNote('#1F7A47')}>⏱ Your car will be ready 10 mins early.</div>}
-            {demoState === 'delayed' && <div style={adjustmentNote('#B23A3A')}>⚠️ Delayed by 20 mins — we'll text you when ready.</div>}
-
-            <div style={{ marginTop: 22, padding: '12px 14px', background: '#F8F8F8', border: '1px dashed #D8CFBC', borderRadius: 4, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', fontFamily: "'Barlow Condensed',sans-serif", fontSize: 11, fontWeight: 600, letterSpacing: '0.18em', textTransform: 'uppercase', color: '#666666' }}>
-              <span>Demo state:</span>
-              <div style={{ display: 'inline-flex', gap: 6 }}>
-                {[{ id: 'active', label: 'Active' }, { id: 'early', label: 'Early' }, { id: 'delayed', label: 'Delayed' }, { id: 'ready', label: 'Ready' }].map(s => (
-                  <button key={s.id} onClick={() => { if (s.id === 'ready') setFlow('oil-ready'); else setDemoState(s.id); }} style={{ padding: '6px 12px', background: demoState === s.id ? '#111111' : '#FFFFFF', color: demoState === s.id ? '#C41E3A' : '#111111', border: '1px solid #E5E5E5', borderRadius: 3, cursor: 'pointer', fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 600, fontSize: 11, letterSpacing: '0.14em', textTransform: 'uppercase' }}>{s.label}</button>
-                ))}
-              </div>
-            </div>
+            {adjustmentMins < 0 && (
+              <div style={adjustmentNote('#1F7A47')}>⏱ Your car will be ready {Math.abs(adjustmentMins)} mins early.</div>
+            )}
+            {adjustmentMins > 0 && (
+              <div style={adjustmentNote('#B23A3A')}>⚠️ Delayed by {adjustmentMins} mins — we'll text you when ready.</div>
+            )}
 
             <ShopCard />
           </div>
@@ -229,31 +280,31 @@ export default function TrackMyCarModal({ open, onClose }: { open: boolean; onCl
       {flow === 'repair-lookup' && (
         <>
           <div style={modalBodyStyle}>
-            <p style={wizardLead}>Enter your ticket ID and email or phone to pull up your repair status.</p>
+            <p style={wizardLead}>Enter your ticket number and phone to pull up your repair status.</p>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginTop: 18 }}>
-              <Field label="Ticket ID" full>
-                <input type="text" placeholder="e.g. LQAR-1748000000000"
-                  value={repairLookup.ticketId}
-                  onChange={e => setRepairLookup({ ...repairLookup, ticketId: e.target.value })}
+              <Field label="Ticket Number" full>
+                <input type="text" placeholder="GAR-XXXXXXXXXX"
+                  value={repairLookup.ticket}
+                  onChange={e => setRepairLookup({ ...repairLookup, ticket: e.target.value.toUpperCase() })}
                   style={{ ...inputStyle, letterSpacing: '0.08em', fontFamily: 'ui-monospace,monospace', fontWeight: 600 }} />
               </Field>
-              <Field label="Email or last 7 digits of phone" full>
-                <input type="text" placeholder="you@email.com or 664-4031"
-                  value={repairLookup.contact}
-                  onChange={e => setRepairLookup({ ...repairLookup, contact: e.target.value })}
+              <Field label="Phone (verification)" full>
+                <input type="tel" placeholder="(530) 555-0100"
+                  value={repairLookup.phone}
+                  onChange={e => setRepairLookup({ ...repairLookup, phone: e.target.value })}
                   style={inputStyle} />
               </Field>
             </div>
             <p style={{ fontFamily: 'Inter,sans-serif', fontSize: 12.5, color: '#666666', marginTop: 14, lineHeight: 1.5 }}>
-              Your ticket ID was emailed when you booked. Contact us at <a href="tel:5306664031" style={{ color: '#C41E3A' }}>(530) 666-4031</a> if you need help finding it.
+              Your ticket number was emailed when you booked. Contact us at <a href="tel:5306664031" style={{ color: '#C41E3A' }}>(530) 666-4031</a> if you need help finding it.
             </p>
           </div>
           <div style={modalFooterStyle}>
             <span />
             <button
               onClick={handleRepairLookup}
-              disabled={!repairLookup.ticketId.trim() || !repairLookup.contact.trim()}
-              style={{ ...btnFilledRed, padding: '12px 22px', fontSize: 13, opacity: (!repairLookup.ticketId.trim() || !repairLookup.contact.trim()) ? 0.5 : 1, cursor: (!repairLookup.ticketId.trim() || !repairLookup.contact.trim()) ? 'not-allowed' : 'pointer' }}>
+              disabled={!repairLookup.ticket.trim() || !repairLookup.phone.trim()}
+              style={{ ...btnFilledRed, padding: '12px 22px', fontSize: 13, opacity: (!repairLookup.ticket.trim() || !repairLookup.phone.trim()) ? 0.5 : 1, cursor: (!repairLookup.ticket.trim() || !repairLookup.phone.trim()) ? 'not-allowed' : 'pointer' }}>
               Find My Ticket <ArrowRight size={14} style={{ marginLeft: 8, verticalAlign: '-2px' }} />
             </button>
           </div>
@@ -275,7 +326,7 @@ export default function TrackMyCarModal({ open, onClose }: { open: boolean; onCl
           </div>
           <h3 style={{ fontFamily: "'Bebas Neue',sans-serif", fontSize: 36, color: '#111111', margin: '0 0 10px', lineHeight: 1 }}>Ticket not found</h3>
           <p style={{ fontFamily: 'Inter,sans-serif', fontSize: 15, color: '#666666', maxWidth: 420, margin: '0 auto 24px', lineHeight: 1.6 }}>
-            We couldn't find a ticket matching that ID and contact info. Double-check your confirmation email or give us a call.
+            {repairError || "We couldn't find a ticket matching that number and phone. Double-check your confirmation email or give us a call."}
           </p>
           <div style={{ display: 'flex', justifyContent: 'center', gap: 12, flexWrap: 'wrap' }}>
             <button onClick={() => setFlow('repair-lookup')} style={{ ...btnFilledRed, padding: '12px 20px', fontSize: 13 }}>Try Again</button>
@@ -286,67 +337,36 @@ export default function TrackMyCarModal({ open, onClose }: { open: boolean; onCl
         </div>
       )}
 
-      {flow === 'repair-status' && repairResult && (
-        <RepairStatusView ticket={repairResult} />
+      {flow === 'repair-status' && ticketResult && (
+        <LiveRepairStatus ticket={ticketResult} />
       )}
     </ModalShell>
   );
 }
 
-function RepairStatusView({ ticket }: { ticket: TrackResult }) {
-  const stageIdx = STATUS_ORDER.indexOf(ticket.status);
-  const active = STAGES[stageIdx] ?? STAGES[0];
-  const progressPct = stageIdx / (STAGES.length - 1);
-
+function LiveRepairStatus({ ticket }: { ticket: TicketResult }) {
+  const mapped = STATUS_MAP[ticket.status] ?? { label: ticket.status, icon: 'wrench' };
   return (
     <div style={modalBodyStyle}>
-      <div style={{ padding: '14px 16px', background: '#F5F5F5', border: '1px solid #E5E5E5', borderRadius: 6, display: 'flex', alignItems: 'center', gap: 12, marginBottom: 22 }}>
-        <Car size={22} style={{ color: '#C41E3A' }} />
-        <div>
-          <div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontSize: 11, fontWeight: 600, color: '#C41E3A', letterSpacing: '0.22em', textTransform: 'uppercase' }}>
-            {ticket.id}
-          </div>
-          <div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 700, fontSize: 17, color: '#111111', marginTop: 2 }}>
-            {ticket.year} {ticket.make} {ticket.model}
-            {ticket.licensePlate && <> · <span style={{ fontFamily: 'ui-monospace,monospace', fontWeight: 600 }}>{ticket.licensePlate}</span></>}
-          </div>
-          {ticket.customerName && (
-            <div style={{ fontFamily: 'Inter,sans-serif', fontSize: 13, color: '#666666', marginTop: 2 }}>{ticket.customerName}</div>
-          )}
-        </div>
-      </div>
-
-      <div style={{ position: 'relative', padding: '6px 6px 0', marginBottom: 22 }}>
-        <div style={{ position: 'absolute', left: 24, right: 24, top: 24, height: 3, background: '#E5E5E5', borderRadius: 2, zIndex: 0 }} />
-        <div style={{ position: 'absolute', left: 24, top: 24, height: 3, background: '#C41E3A', borderRadius: 2, zIndex: 1, width: `calc(${progressPct * 100}% * (1 - 48px / 100%))`, maxWidth: 'calc(100% - 48px)', transition: 'width 400ms ease' }} />
-        <div style={{ position: 'relative', zIndex: 2, display: 'flex', justifyContent: 'space-between' }}>
-          {STAGES.map((s, i) => {
-            const passed = i < stageIdx;
-            const isActive = i === stageIdx;
-            return (
-              <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
-                <div style={{ width: 50, height: 50, borderRadius: '50%', background: passed || isActive ? '#C41E3A' : '#FFFFFF', border: `2px solid ${passed || isActive ? '#C41E3A' : '#E5E5E5'}`, color: passed || isActive ? '#111111' : '#AAAAAA', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', transition: 'all 280ms', boxShadow: isActive ? '0 0 0 6px rgba(196,30,58,0.2)' : 'none' }}>
-                  {passed ? <Check size={22} style={{ strokeWidth: 3 }} /> : <DynamicIcon name={s.icon} size={20} />}
-                </div>
-                <div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: '0.16em', textTransform: 'uppercase', color: isActive ? '#111111' : (passed ? '#333333' : '#AAAAAA'), textAlign: 'center' }}>{s.label}</div>
-              </div>
-            );
-          })}
+      <div style={{ padding: '14px 16px', background: '#F5F5F5', border: '1px solid #E5E5E5', borderRadius: 6, marginBottom: 16 }}>
+        <div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontSize: 11, fontWeight: 600, color: '#C41E3A', letterSpacing: '0.22em', textTransform: 'uppercase', marginBottom: 4 }}>Ticket Number</div>
+        <div style={{ fontFamily: 'ui-monospace,"SF Mono",Menlo,monospace', fontWeight: 700, fontSize: 18, color: '#111111', letterSpacing: '0.06em' }}>
+          {ticket.ticket_number}
         </div>
       </div>
 
       <div style={{ background: '#111111', color: '#F5F5F5', borderRadius: 8, padding: '20px 22px', display: 'flex', gap: 14, alignItems: 'flex-start', borderLeft: '4px solid #C41E3A' }}>
-        <DynamicIcon name={active.icon} size={22} style={{ color: '#C41E3A', flexShrink: 0, marginTop: 2 }} />
+        <DynamicIcon name={mapped.icon} size={22} style={{ color: '#C41E3A', flexShrink: 0, marginTop: 2 }} />
         <div>
-          <div style={{ fontFamily: "'Barlow Condensed',sans-serif", color: '#C41E3A', fontSize: 11, fontWeight: 700, letterSpacing: '0.28em', textTransform: 'uppercase', marginBottom: 6 }}>Status update</div>
-          <div style={{ fontFamily: 'Inter,sans-serif', fontSize: 15, lineHeight: 1.55, color: '#F5F5F5' }}>{active.msg}</div>
+          <div style={{ fontFamily: "'Barlow Condensed',sans-serif", color: '#C41E3A', fontSize: 11, fontWeight: 700, letterSpacing: '0.28em', textTransform: 'uppercase', marginBottom: 6 }}>Status Update</div>
+          <div style={{ fontFamily: 'Inter,sans-serif', fontSize: 15, lineHeight: 1.55, color: '#F5F5F5' }}>{mapped.label}</div>
         </div>
       </div>
 
-      {(ticket.appointmentDate || ticket.appointmentTime) && (
-        <div style={{ marginTop: 14, padding: '12px 16px', background: '#F5F5F5', border: '1px solid #E5E5E5', borderRadius: 6, fontFamily: 'Inter,sans-serif', fontSize: 13.5, color: '#333333' }}>
-          <span style={{ fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 700, fontSize: 11, letterSpacing: '0.22em', textTransform: 'uppercase', color: '#C41E3A', marginRight: 8 }}>Appointment</span>
-          {ticket.appointmentDate}{ticket.appointmentDate && ticket.appointmentTime ? ' · ' : ''}{ticket.appointmentTime}
+      {ticket.notes && (
+        <div style={{ marginTop: 14, padding: '12px 16px', background: '#FFFBF0', border: '1px solid #E5D87A', borderLeft: '4px solid #C8A83C', borderRadius: 6, fontFamily: 'Inter,sans-serif', fontSize: 14, color: '#5A4A00', lineHeight: 1.55 }}>
+          <div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 700, fontSize: 11, letterSpacing: '0.22em', textTransform: 'uppercase', color: '#92760A', marginBottom: 4 }}>Shop Note</div>
+          {ticket.notes}
         </div>
       )}
 
